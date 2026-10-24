@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f6f2">
+  <title>Join a session · Sermon Translate</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-title-i18n="page.index_title">
+  <header class="site-header">
+    <a class="brand" href="/index.html"><span class="brand-mark" aria-hidden="true">S</span>Sermon Translate</a>
+    <div class="header-actions">
+      <label class="locale-control"><span data-i18n="language.label">Language</span>
+        <select id="locale-picker" aria-label="Language" data-i18n-aria-label="language.label">
+          <option value="en" data-i18n="language.en">English</option>
+          <option value="de" data-i18n="language.de">German</option>
+          <option value="uk" data-i18n="language.uk">Ukrainian</option>
+        </select>
+      </label>
+      <a class="header-link" href="/provider.html" data-i18n="nav.host">Host a session</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <p class="eyebrow" data-i18n="sessions.eyebrow">Live translation</p>
+    <h1 data-i18n="sessions.heading">Follow along in your language.</h1>
+    <p class="lead" data-i18n="sessions.intro">Choose a live session and select the language you’d like to read.</p>
+
+    <section aria-labelledby="sessions-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow" data-i18n="sessions.available">Available now</p>
+          <h2 id="sessions-title" data-i18n="sessions.title">Live sessions</h2>
+        </div>
+        <button class="secondary" id="refresh" type="button" data-i18n="sessions.refresh">Refresh list</button>
+      </div>
+      <div id="session-list" class="session-list" aria-live="polite">
+        <div class="empty-state" data-i18n="sessions.loading">Finding live sessions…</div>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script src="/i18n.js"></script>
+  <script>
+    const sessionList = document.getElementById("session-list");
+    const statusMessage = document.getElementById("status");
+    let locales = [];
+    let currentSessions = [];
+    let listLoadFailed = false;
+
+    function showStatus(key, values = {}) {
+      statusMessage.textContent = window.i18n.t(key, values);
+    }
+
+    async function loadLocales() {
+      const response = await fetch("/api/locales");
+      if (!response.ok) throw new Error(window.i18n.t("provider.language_request_error", { status: response.status }));
+      const data = await response.json();
+      locales = Array.isArray(data.locales) ? data.locales : [];
+    }
+
+    function createSessionCard(session) {
+      const card = document.createElement("article");
+      card.className = "session-card";
+      const title = document.createElement("h3");
+      title.textContent = session.name || window.i18n.t("sessions.live");
+      card.append(title);
+
+      const meta = document.createElement("div");
+      meta.className = "session-meta";
+      const source = document.createElement("span");
+      source.className = "badge";
+      source.textContent = window.i18n.t("sessions.spoken", { language: session.language });
+      const count = document.createElement("span");
+      count.className = "badge";
+      count.textContent = window.i18n.t(
+        session.subscribers === 1 ? "sessions.listener_one" : "sessions.listener_many",
+        { count: session.subscribers }
+      );
+      const audio = document.createElement("span");
+      audio.className = `badge audio-state ${session.audio_active ? "active" : "inactive"}`;
+      audio.textContent = window.i18n.t(
+        session.audio_active ? "sessions.audio_active" : "sessions.audio_inactive"
+      );
+      meta.append(source, count, audio);
+      card.append(meta);
+
+      const form = document.createElement("form");
+      form.className = "inline-form";
+      const field = document.createElement("div");
+      field.className = "field";
+      const label = document.createElement("label");
+      const selectId = `language-${session.id}`;
+      label.htmlFor = selectId;
+      label.textContent = window.i18n.t("sessions.target_language");
+      const select = document.createElement("select");
+      select.id = selectId;
+      select.required = true;
+
+      const choices = locales;
+      const suggested = choices.some((locale) => locale.code === "en") ? "en" : choices[0]?.code;
+      for (const locale of choices) {
+        if (locale && locale.code && locale.name) {
+          const option = new Option(`${locale.name} (${locale.code})`, locale.code);
+          option.selected = locale.code === suggested;
+          select.add(option);
+        }
+      }
+      field.append(label, select);
+      const joinButton = document.createElement("button");
+      joinButton.type = "submit";
+      joinButton.textContent = window.i18n.t("sessions.join");
+      joinButton.disabled = select.options.length === 0;
+      if (joinButton.disabled) {
+        select.add(new Option(window.i18n.t("sessions.no_languages"), ""));
+      }
+      form.append(field, joinButton);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const query = new URLSearchParams({ id: session.id, lang: select.value });
+        location.href = `/view.html?${query}`;
+      });
+      card.append(form);
+      return card;
+    }
+
+    async function loadSessions(showLoading = true) {
+      if (showLoading) {
+        sessionList.replaceChildren();
+        const loading = document.createElement("div");
+        loading.className = "empty-state";
+        loading.textContent = window.i18n.t("sessions.loading");
+        sessionList.append(loading);
+        statusMessage.classList.remove("error");
+      }
+
+      try {
+        const [sessionsResponse] = await Promise.all([
+          fetch("/sessions"),
+          locales.length ? Promise.resolve() : loadLocales()
+        ]);
+        if (!sessionsResponse.ok) throw new Error(window.i18n.t("sessions.request_error", { status: sessionsResponse.status }));
+        currentSessions = await sessionsResponse.json();
+        listLoadFailed = false;
+        renderSessions();
+      } catch (error) {
+        currentSessions = null;
+        listLoadFailed = true;
+        sessionList.replaceChildren();
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = window.i18n.t("sessions.load_error");
+        sessionList.append(empty);
+        statusMessage.textContent = window.i18n.t("sessions.load_error");
+        statusMessage.classList.add("error");
+      }
+    }
+
+    function renderSessions() {
+      const selectedLanguages = new Map(
+        Array.from(sessionList.querySelectorAll("select[id^='language-']"))
+          .map((select) => [select.id, select.value])
+      );
+      sessionList.replaceChildren();
+      if (listLoadFailed) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = window.i18n.t("sessions.load_error");
+        sessionList.append(empty);
+        showStatus("sessions.load_error");
+        statusMessage.classList.add("error");
+        return;
+      }
+      if (!Array.isArray(currentSessions) || currentSessions.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = window.i18n.t("sessions.none");
+        sessionList.append(empty);
+        statusMessage.textContent = "";
+        return;
+      }
+      for (const session of currentSessions) {
+        const card = createSessionCard(session);
+        sessionList.append(card);
+        const select = card.querySelector("select");
+        const previousValue = selectedLanguages.get(select.id);
+        if (previousValue && Array.from(select.options).some((option) => option.value === previousValue)) {
+          select.value = previousValue;
+        }
+      }
+      showStatus(
+        currentSessions.length === 1 ? "sessions.showing_one" : "sessions.showing_many",
+        { count: currentSessions.length }
+      );
+      statusMessage.classList.remove("error");
+    }
+
+    document.getElementById("refresh").addEventListener("click", loadSessions);
+    window.addEventListener("sermon-locale-change", renderSessions);
+    loadSessions();
+    window.setInterval(() => loadSessions(false), 5000);
+  </script>
+</body>
+</html>

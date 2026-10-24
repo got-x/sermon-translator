@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f6f2">
+  <title>Create a session · Sermon Translate</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-title-i18n="page.provider_title">
+  <header class="site-header">
+    <a class="brand" href="/provider.html"><span class="brand-mark" aria-hidden="true">S</span>Sermon Translate</a>
+    <div class="header-actions">
+      <label class="locale-control"><span data-i18n="language.label">Language</span>
+        <select id="locale-picker" aria-label="Language" data-i18n-aria-label="language.label">
+          <option value="en" data-i18n="language.en">English</option>
+          <option value="de" data-i18n="language.de">German</option>
+          <option value="uk" data-i18n="language.uk">Ukrainian</option>
+        </select>
+      </label>
+      <a class="header-link" href="/index.html" data-i18n="nav.join">Join a session</a>
+    </div>
+  </header>
+
+  <main class="page narrow">
+    <p class="eyebrow" data-i18n="provider.eyebrow">For speakers</p>
+    <h1 data-i18n="provider.heading">Start a session</h1>
+    <p class="lead" data-i18n="provider.intro">Create a live session for your audience. They can join from their phones and follow along in their preferred language.</p>
+
+    <section class="panel" aria-labelledby="form-title">
+      <h2 id="form-title" data-i18n="provider.details">Session details</h2>
+      <form class="form" id="create-form">
+        <div class="field">
+          <label for="name" data-i18n="provider.name">Session name</label>
+          <input id="name" name="name" data-i18n-placeholder="provider.name_placeholder" placeholder="e.g. Sunday service" autocomplete="off" required maxlength="100">
+        </div>
+        <div class="field">
+          <label for="lang" data-i18n="provider.spoken_language">Spoken language</label>
+          <select id="lang" name="language" required>
+            <option value="" data-i18n="provider.loading_languages">Loading available languages…</option>
+          </select>
+        </div>
+        <button id="create-button" type="submit" data-i18n="provider.create">Create session</button>
+      </form>
+      <p class="status" id="status" role="status" aria-live="polite" data-i18n="provider.loading_status">Loading languages…</p>
+    </section>
+    <p class="footer-note" data-i18n="provider.language_note">The language list reflects what the translation service currently supports.</p>
+  </main>
+
+  <script src="/i18n.js"></script>
+  <script>
+    const languageSelect = document.getElementById("lang");
+    const statusMessage = document.getElementById("status");
+    const createButton = document.getElementById("create-button");
+    let statusKey = "provider.loading_status";
+    let statusValues = {};
+    let statusError = false;
+
+    function setStatus(key, values = {}, isError = false) {
+      statusKey = key;
+      statusValues = values;
+      statusError = isError;
+      statusMessage.textContent = window.i18n.t(key, values);
+      statusMessage.classList.toggle("error", isError);
+    }
+
+    async function loadLanguages() {
+      try {
+        const response = await fetch("/api/locales");
+        if (!response.ok) {
+          setStatus("provider.language_request_error", { status: response.status }, true);
+          throw new Error("Locale request failed.");
+        }
+        const data = await response.json();
+        const locales = Array.isArray(data.locales) ? data.locales : [];
+        languageSelect.replaceChildren();
+
+        if (!locales.length) {
+          languageSelect.add(new Option(window.i18n.t("provider.no_languages"), ""));
+          createButton.disabled = true;
+          setStatus("provider.languages_unavailable", {}, true);
+          return;
+        }
+
+        languageSelect.add(new Option(window.i18n.t("provider.choose_language"), ""));
+        for (const locale of locales) {
+          if (locale && locale.code && locale.name) {
+            languageSelect.add(new Option(`${locale.name} (${locale.code})`, locale.code));
+          }
+        }
+        setStatus("provider.language_hint");
+      } catch (error) {
+        if (statusError) return;
+        languageSelect.replaceChildren(new Option(window.i18n.t("provider.no_languages"), ""));
+        createButton.disabled = true;
+        setStatus("provider.language_failed", {}, true);
+      }
+    }
+
+    document.getElementById("create-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      createButton.disabled = true;
+      setStatus("provider.create_status");
+      try {
+        const response = await fetch("/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: document.getElementById("name").value.trim(),
+            language: languageSelect.value
+          })
+        });
+        if (!response.ok) {
+          setStatus("provider.create_error", { status: response.status }, true);
+          createButton.disabled = false;
+          return;
+        }
+        const data = await response.json();
+        if (!data.session_id) {
+          setStatus("provider.no_session_id", {}, true);
+          createButton.disabled = false;
+          return;
+        }
+        location.href = `/provider_session.html?id=${encodeURIComponent(data.session_id)}`;
+      } catch (error) {
+        setStatus("provider.create_failed", {}, true);
+        createButton.disabled = false;
+      }
+    });
+
+    window.addEventListener("sermon-locale-change", () => {
+      setStatus(statusKey, statusValues, statusError);
+      for (const option of languageSelect.options) {
+        if (option.value === "" && languageSelect.options.length > 1) {
+          option.textContent = window.i18n.t(
+            option.dataset.i18n || "provider.choose_language"
+          );
+        }
+      }
+    });
+
+    loadLanguages();
+  </script>
+</body>
+</html>

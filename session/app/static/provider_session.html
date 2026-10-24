@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f6f2">
+  <title>Live session · Sermon Translate</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-title-i18n="page.speaker_title">
+  <header class="site-header">
+    <a class="brand" href="/provider.html"><span class="brand-mark" aria-hidden="true">S</span>Sermon Translate</a>
+    <div class="header-actions">
+      <label class="locale-control"><span data-i18n="language.label">Language</span>
+        <select id="locale-picker" aria-label="Language" data-i18n-aria-label="language.label">
+          <option value="en" data-i18n="language.en">English</option>
+          <option value="de" data-i18n="language.de">German</option>
+          <option value="uk" data-i18n="language.uk">Ukrainian</option>
+        </select>
+      </label>
+      <a class="header-link" href="/index.html" data-i18n="nav.sessions">Session list</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <p class="eyebrow" data-i18n="speaker.eyebrow">Speaker dashboard</p>
+    <h1 id="title" data-i18n="speaker.loading">Loading session…</h1>
+    <p class="lead" data-i18n="speaker.intro">Start the microphone to stream live speech, or enter text to share it with listeners.</p>
+
+    <section class="panel" aria-labelledby="audio-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow" data-i18n="speaker.live_audio">Live audio</p>
+          <h2 id="audio-title" data-i18n="speaker.microphone">Microphone</h2>
+        </div>
+        <span id="connection" class="live-indicator" data-i18n="speaker.not_connected">Not connected</span>
+      </div>
+      <div class="toolbar">
+        <button id="start" type="button" data-i18n="speaker.start_microphone">Start microphone</button>
+        <button id="stop" class="danger" type="button" disabled data-i18n="speaker.stop_microphone">Stop microphone</button>
+      </div>
+      <p id="audio-status" class="status" role="status" aria-live="polite" data-i18n="speaker.microphone_off">Microphone is off.</p>
+      <p class="footer-note" data-i18n="speaker.microphone_hint">Allow microphone access when your browser asks. This page must be served over HTTPS (or opened on localhost) to use the microphone.</p>
+    </section>
+
+    <section class="panel" style="margin-top: 1.25rem" aria-labelledby="manual-title">
+      <p class="eyebrow" data-i18n="speaker.text_input">Text input</p>
+      <h2 id="manual-title" data-i18n="speaker.share_message">Share a message</h2>
+      <form id="text-form" class="inline-form">
+        <div class="field">
+          <label for="text" data-i18n="speaker.message">Message</label>
+          <input id="text" data-i18n-placeholder="speaker.message_placeholder" placeholder="Type a message to translate…" autocomplete="off" maxlength="5000" required>
+        </div>
+        <button id="send" type="submit" data-i18n="speaker.send">Send message</button>
+      </form>
+      <p id="text-status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section style="margin-top: 2rem" aria-labelledby="recent-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow" data-i18n="speaker.live_feed">Live feed</p>
+          <h2 id="recent-title" data-i18n="speaker.recent">Recent transcripts</h2>
+        </div>
+      </div>
+      <p id="transcript-status" class="status" role="status" aria-live="polite"></p>
+      <div id="log" class="transcript-list">
+        <div id="empty" class="empty-state" data-i18n="speaker.transcripts_empty">Transcripts will appear here as speech is recognized.</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/i18n.js"></script>
+  <script>
+    const sessionId = new URLSearchParams(location.search).get("id");
+    const title = document.getElementById("title");
+    const log = document.getElementById("log");
+    const audioStatus = document.getElementById("audio-status");
+    const transcriptStatus = document.getElementById("transcript-status");
+    const connection = document.getElementById("connection");
+    const startButton = document.getElementById("start");
+    const stopButton = document.getElementById("stop");
+    let session = null;
+    let ws = null;
+    let mediaStream = null;
+    let audioContext = null;
+    let processor = null;
+    let source = null;
+    let audioSettings = {
+      sample_rate: 16000,
+      channels: 1,
+      chunk_duration_ms: 100
+    };
+    let transcriptSnapshot = [];
+    let connectionKey = "speaker.not_connected";
+    let connectionValues = {};
+    let audioStatusKey = "speaker.microphone_off";
+    let audioStatusValues = {};
+    let audioStatusError = false;
+    let textStatusKey = "";
+    let textStatusValues = {};
+    let textStatusError = false;
+    let transcriptStatusValues = {};
+    let sessionUnavailable = false;
+
+    function setConnection(key, state = "", values = {}) {
+      connectionKey = key;
+      connectionValues = values;
+      connection.textContent = window.i18n.t(key, values);
+      connection.className = `live-indicator ${state}`.trim();
+    }
+
+    function setAudioStatus(key, values = {}, isError = false) {
+      audioStatusKey = key;
+      audioStatusValues = values;
+      audioStatusError = isError;
+      audioStatus.textContent = window.i18n.t(key, values);
+      audioStatus.classList.toggle("error", isError);
+    }
+
+    function setTextStatus(key, values = {}, isError = false) {
+      textStatusKey = key;
+      textStatusValues = values;
+      textStatusError = isError;
+      const status = document.getElementById("text-status");
+      status.textContent = key ? window.i18n.t(key, values) : "";
+      status.classList.toggle("error", isError);
+    }
+
+    function addTranscript(text) {
+      document.getElementById("empty")?.remove();
+      const card = document.createElement("article");
+      card.className = "transcript-card";
+      const content = document.createElement("p");
+      content.className = "translation";
+      content.textContent = text;
+      card.append(content);
+      log.prepend(card);
+    }
+
+    async function loadSession() {
+      if (!sessionId) throw new Error(window.i18n.t("speaker.missing_session"));
+      const response = await fetch(`/session/${encodeURIComponent(sessionId)}`);
+      if (!response.ok) throw new Error(window.i18n.t("speaker.session_load_error", { status: response.status }));
+      session = await response.json();
+      title.textContent = `${session.name} (${session.language})`;
+      title.dataset.sessionName = session.name;
+      title.dataset.sessionLanguage = session.language;
+      if (session.audio) {
+        audioSettings = { ...audioSettings, ...session.audio };
+      }
+      transcriptSnapshot = session.transcripts || [];
+      for (const transcript of [...transcriptSnapshot].reverse()) {
+        addTranscript(transcript.text);
+      }
+    }
+
+    async function refreshRecentTranscripts() {
+      try {
+        const response = await fetch(`/session/${encodeURIComponent(sessionId)}`);
+        if (!response.ok) {
+          throw new Error(window.i18n.t("speaker.transcript_refresh_error", { status: response.status }));
+        }
+        const data = await response.json();
+        const current = Array.isArray(data.transcripts) ? data.transcripts : [];
+
+        let overlap = Math.min(transcriptSnapshot.length, current.length);
+        while (overlap > 0) {
+          const previousTail = transcriptSnapshot.slice(-overlap);
+          const currentHead = current.slice(0, overlap);
+          if (previousTail.every((item, index) =>
+            JSON.stringify(item) === JSON.stringify(currentHead[index])
+          )) {
+            break;
+          }
+          overlap--;
+        }
+
+        for (const transcript of current.slice(overlap)) {
+          addTranscript(transcript.text);
+        }
+        transcriptSnapshot = current;
+        transcriptStatus.textContent = "";
+        transcriptStatusValues = {};
+        transcriptStatus.classList.remove("error");
+      } catch (error) {
+        transcriptStatusValues = { status: error.message.match(/HTTP (\d+)/)?.[1] || "" };
+        transcriptStatus.textContent = window.i18n.t(
+          "speaker.transcript_refresh_error",
+          transcriptStatusValues
+        );
+        transcriptStatus.classList.add("error");
+      }
+    }
+
+    function stopMicrophone(
+      closeSocket = true,
+      statusKey = "speaker.microphone_off",
+      statusValues = {}
+    ) {
+      if (processor) processor.disconnect();
+      if (source) source.disconnect();
+      if (mediaStream) mediaStream.getTracks().forEach((track) => track.stop());
+      if (audioContext && audioContext.state !== "closed") audioContext.close();
+      if (closeSocket && ws && ws.readyState < WebSocket.CLOSING) ws.close();
+      processor = null;
+      source = null;
+      mediaStream = null;
+      audioContext = null;
+      ws = null;
+      startButton.disabled = false;
+      stopButton.disabled = true;
+      setAudioStatus(statusKey, statusValues, statusKey === "speaker.microphone_error");
+      setConnection("speaker.not_connected");
+    }
+
+    async function start() {
+      if (!session || ws) return;
+      startButton.disabled = true;
+      audioStatus.classList.remove("error");
+      setAudioStatus("speaker.connecting_status");
+      setConnection("speaker.connecting");
+
+      try {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(`${protocol}//${location.host}/ws/audio/${encodeURIComponent(sessionId)}`);
+        ws = socket;
+
+        socket.onopen = async () => {
+          try {
+            socket.send(JSON.stringify({
+              config: {
+                sample_rate: audioSettings.sample_rate,
+                channels: audioSettings.channels,
+                language: session.language,
+                task: "transcribe"
+              }
+            }));
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioContext = new AudioContext({ sampleRate: audioSettings.sample_rate });
+            source = audioContext.createMediaStreamSource(mediaStream);
+            processor = audioContext.createScriptProcessor(
+              4096,
+              audioSettings.channels,
+              audioSettings.channels
+            );
+            const framesPerChunk = Math.max(
+              1,
+              Math.round(audioSettings.sample_rate * audioSettings.chunk_duration_ms / 1000)
+            );
+            let chunkOffset = 0;
+            let pcmChunk = new Int16Array(framesPerChunk * audioSettings.channels);
+            processor.onaudioprocess = (event) => {
+              if (socket.readyState !== WebSocket.OPEN) return;
+              const input = event.inputBuffer;
+              const channelData = Array.from(
+                { length: audioSettings.channels },
+                (_, channel) => input.getChannelData(Math.min(channel, input.numberOfChannels - 1))
+              );
+              for (let frame = 0; frame < input.length; frame++) {
+                for (let channel = 0; channel < audioSettings.channels; channel++) {
+                  const sample = Math.max(-1, Math.min(1, channelData[channel][frame]));
+                  pcmChunk[chunkOffset * audioSettings.channels + channel] =
+                    sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+                }
+                chunkOffset++;
+                if (chunkOffset === framesPerChunk) {
+                  socket.send(pcmChunk.buffer);
+                  pcmChunk = new Int16Array(framesPerChunk * audioSettings.channels);
+                  chunkOffset = 0;
+                }
+              }
+            };
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+            setAudioStatus("speaker.live");
+            setConnection("speaker.microphone_live", "connected");
+            stopButton.disabled = false;
+          } catch (error) {
+            stopMicrophone(true, "speaker.microphone_error", { error: error.message });
+          }
+        };
+
+        socket.onmessage = (event) => addTranscript(
+          window.i18n.t("speaker.transcript_prefix", { text: event.data })
+        );
+        socket.onerror = () => {
+          setAudioStatus("speaker.connection_error", {}, true);
+          setConnection("speaker.connection_error", "error");
+        };
+        socket.onclose = () => {
+          const wasActive = ws === socket;
+          if (wasActive) {
+            stopMicrophone(false);
+            setAudioStatus("speaker.connection_closed");
+          }
+        };
+      } catch (error) {
+        stopMicrophone(true, "speaker.microphone_error", { error: error.message });
+      }
+    }
+
+    document.getElementById("start").addEventListener("click", start);
+    document.getElementById("stop").addEventListener("click", () => stopMicrophone());
+    document.getElementById("text-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = document.getElementById("text");
+      const sendButton = document.getElementById("send");
+      const message = input.value.trim();
+      if (!message) return;
+      sendButton.disabled = true;
+      setTextStatus("speaker.sending");
+      try {
+        const response = await fetch(`/session/${encodeURIComponent(sessionId)}/text`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: message })
+        });
+        if (!response.ok) {
+          setTextStatus("speaker.send_error", { status: response.status }, true);
+          return;
+        }
+        input.value = "";
+        setTextStatus("speaker.message_sent");
+      } catch {
+        setTextStatus("speaker.send_failed", {}, true);
+      } finally {
+        sendButton.disabled = false;
+      }
+    });
+    window.addEventListener("pagehide", () => stopMicrophone());
+    window.addEventListener("sermon-locale-change", () => {
+      if (title.dataset.sessionName) {
+        title.textContent = `${title.dataset.sessionName} (${title.dataset.sessionLanguage})`;
+      } else if (sessionUnavailable) {
+        title.textContent = window.i18n.t("speaker.session_unavailable");
+      }
+      setConnection(connectionKey, connection.classList.contains("connected") ? "connected" : connection.classList.contains("error") ? "error" : "", connectionValues);
+      setAudioStatus(audioStatusKey, audioStatusValues, audioStatusError);
+      if (textStatusKey) setTextStatus(textStatusKey, textStatusValues, textStatusError);
+      if (transcriptStatus.classList.contains("error")) {
+        transcriptStatus.textContent = window.i18n.t(
+          "speaker.transcript_refresh_error",
+          transcriptStatusValues
+        );
+      }
+    });
+    loadSession().then(() => {
+      window.setInterval(refreshRecentTranscripts, 2000);
+    }).catch((error) => {
+      sessionUnavailable = true;
+      title.textContent = window.i18n.t("speaker.session_unavailable");
+      const statusCode = error.message.match(/HTTP (\d+)/)?.[1];
+      setAudioStatus(
+        statusCode ? "speaker.session_load_error" : "speaker.missing_session",
+        { status: statusCode || "" },
+        true
+      );
+      startButton.disabled = true;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+/.idea
+/.env
+/translate/libretranslate_models
+/speach-to-text/whisper-cache
+/stinput/build
+/stinput/.venv
+/stinput/dist
+/stinput/STInput.spec
+/session/app/__pycache__

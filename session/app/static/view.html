@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f6f2">
+  <title>Live translation · Sermon Translate</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-title-i18n="page.viewer_title">
+  <header class="site-header">
+    <a class="brand" href="/index.html"><span class="brand-mark" aria-hidden="true">S</span>Sermon Translate</a>
+    <div class="header-actions">
+      <label class="locale-control"><span data-i18n="language.label">Language</span>
+        <select id="locale-picker" aria-label="Language" data-i18n-aria-label="language.label">
+          <option value="en" data-i18n="language.en">English</option>
+          <option value="de" data-i18n="language.de">German</option>
+          <option value="uk" data-i18n="language.uk">Ukrainian</option>
+        </select>
+      </label>
+      <a class="header-link" href="/index.html" data-i18n="nav.all_sessions">All sessions</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <p class="eyebrow" data-i18n="viewer.eyebrow">Live translation</p>
+    <h1 id="title" data-i18n="viewer.joining">Joining session…</h1>
+    <p class="lead" data-i18n="viewer.intro">New translations appear automatically below. Keep this page open to follow along.</p>
+    <div class="toolbar">
+      <span id="connection" class="live-indicator" data-i18n="viewer.connecting">Connecting</span>
+    </div>
+    <p id="stream-status" class="stream-status" role="status" aria-live="polite" data-i18n="viewer.waiting_for_stream">Waiting for the speaker stream.</p>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+    <div id="view-controls" class="view-controls">
+      <label class="view-control">
+        <span data-i18n="viewer.order">Translation order</span>
+        <select id="order-picker" aria-label="Translation order" data-i18n-aria-label="viewer.order">
+          <option value="desc" data-i18n="viewer.newest_first">Newest first</option>
+          <option value="asc" data-i18n="viewer.oldest_first">Oldest first</option>
+        </select>
+      </label>
+      <label class="view-control checkbox-control">
+        <input id="original-toggle" type="checkbox" checked>
+        <span data-i18n="viewer.show_original">Show original text</span>
+      </label>
+      <button id="print-toggle" class="secondary" type="button"></button>
+    </div>
+    <section id="feed" class="transcript-list" aria-label="Live translated messages" data-i18n-aria-label="viewer.feed_label">
+      <div id="empty" class="empty-state" data-i18n="viewer.waiting">Waiting for the next translation…</div>
+    </section>
+  </main>
+
+  <script src="/i18n.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const id = params.get("id");
+    const lang = params.get("lang");
+    const title = document.getElementById("title");
+    const statusMessage = document.getElementById("status");
+    const connection = document.getElementById("connection");
+    const streamStatus = document.getElementById("stream-status");
+    const feed = document.getElementById("feed");
+    const orderPicker = document.getElementById("order-picker");
+    const originalToggle = document.getElementById("original-toggle");
+    const printToggle = document.getElementById("print-toggle");
+    const messages = [];
+    let socket;
+    let sessionName = "";
+    let latestSequence = 0;
+    let connectionKey = "viewer.connecting";
+    let statusKey = "";
+    let statusIsError = false;
+    let streamStarted = false;
+    let streamActive = false;
+    let streamStateReceived = false;
+    let printView = false;
+
+    function renderTitle() {
+      const key = sessionName ? "viewer.listening_to_session" : "viewer.listening";
+      title.textContent = window.i18n.t(key, {
+        name: sessionName,
+        language: lang
+      });
+    }
+
+    function setConnection(key, state = "") {
+      connectionKey = key;
+      connection.textContent = window.i18n.t(key);
+      connection.className = `live-indicator ${state}`.trim();
+    }
+
+    function setStatus(key, isError = false) {
+      statusKey = key;
+      statusIsError = isError;
+      statusMessage.textContent = key ? window.i18n.t(key) : "";
+      statusMessage.classList.toggle("error", isError);
+    }
+
+    function renderStreamStatus() {
+      const key = streamActive
+        ? "viewer.stream_live"
+        : streamStarted
+          ? "viewer.stream_ended"
+          : "viewer.waiting_for_stream";
+      streamStatus.textContent = window.i18n.t(key);
+      streamStatus.classList.toggle("ended", streamStarted && !streamActive);
+      streamStatus.classList.toggle("live", streamActive);
+    }
+
+    function renderPrintToggle() {
+      const key = printView ? "viewer.exit_print_view" : "viewer.print_view";
+      printToggle.textContent = window.i18n.t(key);
+      printToggle.setAttribute("aria-pressed", String(printView));
+    }
+
+    function renderFeed() {
+      feed.replaceChildren();
+      if (!messages.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = window.i18n.t("viewer.waiting");
+        feed.append(empty);
+        return;
+      }
+
+      const ordered = [...messages].sort((left, right) =>
+        orderPicker.value === "asc"
+          ? left.sequence - right.sequence
+          : right.sequence - left.sequence
+      );
+      for (const message of ordered) {
+        const card = document.createElement("article");
+        card.className = "transcript-card";
+        const meta = document.createElement("div");
+        meta.className = "transcript-meta";
+        const sequence = document.createElement("span");
+        sequence.className = "sequence-number";
+        sequence.textContent = `#${message.sequence}`;
+        meta.append(sequence);
+        if (message.sequence === latestSequence) {
+          const latest = document.createElement("span");
+          latest.className = "latest-badge";
+          latest.textContent = window.i18n.t("viewer.latest");
+          meta.append(latest);
+        }
+
+        const translation = document.createElement("p");
+        translation.className = "translation";
+        translation.textContent = message.translation || window.i18n.t("viewer.no_translation");
+        const original = document.createElement("p");
+        original.className = "original";
+        original.hidden = !originalToggle.checked;
+        original.textContent = message.original;
+        card.append(meta, translation, original);
+        feed.append(card);
+      }
+    }
+
+    function addMessage(data) {
+      if (data.type === "stream_state") {
+        streamStateReceived = true;
+        streamStarted = Boolean(data.started);
+        streamActive = Boolean(data.active);
+        renderStreamStatus();
+        return;
+      }
+      const sequence = Number.isInteger(data.sequence)
+        ? data.sequence
+        : latestSequence + 1;
+      latestSequence = Math.max(latestSequence, sequence);
+      messages.push({
+        sequence,
+        translation: data.translation || "",
+        original: data.original || ""
+      });
+      renderFeed();
+    }
+
+    orderPicker.addEventListener("change", renderFeed);
+    originalToggle.addEventListener("change", renderFeed);
+    printToggle.addEventListener("click", () => {
+      printView = !printView;
+      document.body.classList.toggle("print-view", printView);
+      renderPrintToggle();
+    });
+    renderPrintToggle();
+    renderStreamStatus();
+
+    if (!id || !lang) {
+      title.textContent = window.i18n.t("viewer.missing_title");
+      setStatus("viewer.missing_message", true);
+      setConnection("viewer.disconnected", "error");
+    } else {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(`${protocol}//${location.host}/ws/subscribe/${encodeURIComponent(id)}?lang=${encodeURIComponent(lang)}`);
+      renderTitle();
+      fetch(`/session/${encodeURIComponent(id)}`)
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`Session details request failed (${response.status}).`);
+          }
+          return response.json();
+        })
+        .then((data) => {
+          if (typeof data.name === "string" && data.name.trim()) {
+            sessionName = data.name;
+            renderTitle();
+          }
+          if (!streamStateReceived) {
+            streamStarted = Boolean(data.audio_started);
+            streamActive = Boolean(data.audio_active);
+            renderStreamStatus();
+          }
+        })
+        .catch((error) => console.error("Could not load session name:", error));
+      socket.onopen = () => {
+        setConnection("viewer.connected", "connected");
+        setStatus("viewer.connected_message");
+      };
+      socket.onerror = () => {
+        setConnection("viewer.connection_error", "error");
+        setStatus("viewer.connect_error", true);
+      };
+      socket.onclose = () => {
+        setConnection("viewer.disconnected", "error");
+        setStatus("viewer.disconnected_message");
+      };
+      socket.onmessage = (event) => {
+        try {
+          addMessage(JSON.parse(event.data));
+        } catch {
+          setStatus("viewer.invalid_message", true);
+        }
+      };
+    }
+
+    window.addEventListener("sermon-locale-change", () => {
+      if (id && lang) {
+        renderTitle();
+      }
+      renderStreamStatus();
+      renderPrintToggle();
+      renderFeed();
+      setConnection(
+        connectionKey,
+        connection.classList.contains("connected") ? "connected" :
+          connection.classList.contains("error") ? "error" : ""
+      );
+      if (statusKey) setStatus(statusKey, statusIsError);
+    });
+  </script>
+</body>
+</html>

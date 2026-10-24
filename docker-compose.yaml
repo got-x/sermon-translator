@@ -1,0 +1,56 @@
+name: sermon-translator
+services:
+  session:
+    container_name: session
+    image: ${SESSION_IMAGE:-python:3.11}
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./session/app:/app
+    environment:
+      AUDIO_SAMPLE_RATE: ${AUDIO_SAMPLE_RATE:-16000}
+      AUDIO_CHANNELS: ${AUDIO_CHANNELS:-1}
+      AUDIO_CHUNK_DURATION_MS: ${AUDIO_CHUNK_DURATION_MS:-100}
+      TRANSLATE_BASE_URL: ${TRANSLATE_BASE_URL:-http://translate:5000}
+      WHISPER_WS_URL: ${WHISPER_WS_URL:-ws://whisper:80/ws}
+      SERVICE_REQUEST_TIMEOUT: ${SERVICE_REQUEST_TIMEOUT:-10}
+      WHISPER_CONNECT_TIMEOUT: ${WHISPER_CONNECT_TIMEOUT:-10}
+    command: >
+      sh -c "pip install fastapi uvicorn httpx websockets pydantic typing &&
+            uvicorn app:app --host 0.0.0.0 --port 8080"
+    ports:
+      - "${SESSION_PORT:-8080}:8080"
+    depends_on:
+      - whisper
+      - translate
+
+  translate:
+    container_name: translate
+    image: ${TRANSLATE_IMAGE:-libretranslate/libretranslate:v1.6.5}
+    restart: unless-stopped
+    ports:
+      - "${TRANSLATE_PORT:-5000}:5000"
+    ## Uncomment this for logging in docker compose logs
+    tty: true
+    healthcheck:
+     test: ['CMD-SHELL', './venv/bin/python scripts/healthcheck.py']
+    environment:
+      - LT_UPDATE_MODELS=false
+      - LT_LOAD_ONLY=${TRANSLATE_LANGUAGES:-en,de,uk}
+    volumes:
+    # Keep the models in a docker volume, to avoid re-downloading on startup
+      - ./translate/libretranslate_models:/home/libretranslate/.local:rw
+
+  whisper:
+    container_name: whisper
+    restart: unless-stopped
+    image: ${WHISPER_IMAGE:-lintoai/linto-stt-whisper:2.0.0}
+    ports:
+      - "${WHISPER_PORT:-9080}:80"
+    environment:
+      SERVICE_MODE: websocket
+      MODEL: ${WHISPER_MODEL:-small}
+      DEVICE: ${WHISPER_DEVICE:-cpu}
+      COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+    volumes:
+      - ./speach-to-text/whisper-cache:/root/.cache
